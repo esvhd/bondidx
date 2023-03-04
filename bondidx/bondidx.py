@@ -7,9 +7,60 @@ import seaborn as sns
 import xarray as xr
 
 import matrix.plottools as pts
+import matrix.config as mc
+import matrix.risk as risk
 from matrix.timeseries import rebase
+from matrix.utils import weighted_average
 
 import pypbo.perf as perf
+
+
+@dataclass(kw_only=True)
+class IndexConfig(object):
+    oasd: str
+    oas: str
+    ytw: str
+    price: str
+    maturity: str
+    coupon: str
+    ticker: str
+    rating: str
+    rating_bucket: str = "rating_bucket"
+    isin: str = None
+    ticker: str = None
+    seniority: str = None
+    amtout: str = None
+    country: str = None
+    currency: str = None
+    sector_lvl_1: str = None
+    sector_lvl_2: str = None
+    sector_lvl_3: str = None
+    sector_lvl_4: str = None
+    weight: str = None
+
+
+def load_config(config_path: str, config_name: str) -> IndexConfig:
+    """Example:
+    conf = idx.load_config('~/config/baml_mapping.ini', config_name='DEFAULT')
+
+    Parameters
+    ----------
+    config_path : str
+        _description_
+    config_name : str
+        _description_
+
+    Returns
+    -------
+    IndexConfig
+        _description_
+    """
+    # load config file
+    conf = mc.load(config_path)
+    idx_conf = conf[config_name]
+
+    conf = IndexConfig(**idx_conf)
+    return conf
 
 
 def slice_reweight(df: pd.DataFrame) -> pd.DataFrame:
@@ -30,19 +81,43 @@ def slice_reweight(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _slice_field_in(df: pd.DataFrame, field: str, values: Union[Iterable, str]):
+    if values is None:
+        return df
+    if isinstance(values, str):
+        values = [values]
+    mask = df[field].isin(values)
+    return df.loc[mask]
+
+
+def _slice_field_not_in(
+    df: pd.DataFrame, field: str, values: Union[Iterable, str]
+):
+    if values is None:
+        return df
+    if isinstance(values, str):
+        values = [values]
+    mask = df[field].isin(values)
+    return df.loc[~mask]
+
+
 def slice_baml(
     df: pd.DataFrame,
+    config: IndexConfig,
     sector_level_2: Union[str, Iterable[str]] = None,
     sector_level_3: Union[str, Iterable[str]] = None,
-    rating_bucket: str = None,
+    rating_bucket: Union[str, Iterable[str]] = None,
     min_maturity: float = None,
     max_maturity: float = None,
     min_eff_dur: float = None,
     max_eff_dur: float = None,
-    rating_notched: str = None,
+    rating_notched: Union[str, Iterable[str]] = None,
     min_oas: float = None,
     remove_defaulted: bool = False,
     seniority: Union[str, Iterable[str]] = None,
+    seniority_not_in: Union[str, Iterable[str]] = None,
+    country_in: Union[str, Iterable[str]] = None,
+    country_not_in: Union[str, Iterable[str]] = None,
     reweight: bool = True,
 ) -> pd.DataFrame:
     """Slice BAML bond data frame by various criteria.
@@ -73,21 +148,27 @@ def slice_baml(
     """
     out = df
 
-    if sector_level_2:
-        if isinstance(sector_level_2, str):
-            sector_level_2 = [sector_level_2]
-        out = out.loc[out.sector_level_2.isin(sector_level_2)]
+    # if sector_level_2:
+    #     if isinstance(sector_level_2, str):
+    #         sector_level_2 = [sector_level_2]
+    #     out = out.loc[out.sector_level_2.isin(sector_level_2)]
 
-    if sector_level_3:
-        if isinstance(sector_level_3, str):
-            sector_level_3 = [sector_level_3]
-        out = out.loc[out.sector_level_3.isin(sector_level_3)]
+    # if sector_level_3:
+    #     if isinstance(sector_level_3, str):
+    #         sector_level_3 = [sector_level_3]
+    #     out = out.loc[out.sector_level_3.isin(sector_level_3)]
 
-    if rating_bucket:
-        out = out.query(f"rating_bucket == '{rating_bucket}'")
+    # if rating_bucket:
+    #     out = out.query(f"rating_bucket == '{rating_bucket}'")
 
-    if rating_notched:
-        out = out.query(f"composite_rating == '{rating_notched}'")
+    # if rating_notched:
+    #     out = out.query(f"composite_rating == '{rating_notched}'")
+
+    out = _slice_field_in(out, config.sector_lvl_2, sector_level_2)
+    out = _slice_field_in(out, config.sector_lvl_3, sector_level_3)
+
+    out = _slice_field_in(out, config.rating_bucket, rating_bucket)
+    out = _slice_field_in(out, config.rating, rating_notched)
 
     if min_maturity:
         out = out.query(f"years_to_mat > {min_maturity}")
@@ -96,23 +177,29 @@ def slice_baml(
         out = out.query(f"years_to_mat <= {max_maturity}")
 
     if min_eff_dur:
-        out = out.query(f"effective_duration > {min_eff_dur}")
+        out = out.query(f"{config.oasd} > {min_eff_dur}")
 
     if max_eff_dur:
-        out = out.query(f"effective_duration <= {max_eff_dur}")
+        out = out.query(f"{config.oasd} <= {max_eff_dur}")
 
     if min_oas is not None:
-        out = out.query(f"oas_vs_govt > {min_oas}")
+        out = out.query(f"{config.oas} > {min_oas}")
 
-    if seniority is not None:
-        if isinstance(seniority, Iterable):
-            out = out.loc[out["type"].isin(seniority)].copy()
-        else:
-            out = out.query(f"type == '{seniority}'")
+    # if seniority is not None:
+    #     if isinstance(seniority, Iterable):
+    #         out = out.loc[out["type"].isin(seniority)].copy()
+    #     else:
+    #         out = out.query(f"type == '{seniority}'")
+
+    out = _slice_field_in(out, config.seniority, seniority)
+    out = _slice_field_not_in(out, config.seniority, seniority_not_in)
+
+    out = _slice_field_in(out, config.country, country_in)
+    out = _slice_field_not_in(out, config.country, country_not_in)
 
     if remove_defaulted:
         # proxy for identifying defaulted bond is OAS vs Govt == 10,000
-        out = out.query("oas_vs_govt < 10000")
+        out = out.query(f"{config.oas} < 10000")
 
     if reweight:
         out = slice_reweight(out)
@@ -170,8 +257,9 @@ def slice_to_ts(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_dict(data)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class BondIndexSlice(object):
+    config: IndexConfig
     sector_level_2: Union[str, Iterable[str]] = None
     sector_level_3: Union[str, Iterable[str]] = None
     rating_bucket: str = None
@@ -181,6 +269,9 @@ class BondIndexSlice(object):
     min_eff_dur: float = None
     max_eff_dur: float = None
     seniority: Union[str, Iterable[str]] = None
+    seniority_not_in: Union[str, Iterable[str]] = None
+    country_in: Union[str, Iterable[str]] = None
+    country_not_in: Union[str, Iterable[str]] = None
     reweight: bool = True
     name: str = None
 
@@ -189,9 +280,10 @@ class BondIndexSlice(object):
         df: pd.DataFrame,
         remove_defaulted: bool = False,
         min_oas: float = None,
-    ):
+    ) -> pd.DataFrame:
         out = slice_baml(
             df,
+            self.config,
             sector_level_2=self.sector_level_2,
             sector_level_3=self.sector_level_3,
             rating_bucket=self.rating_bucket,
@@ -202,6 +294,9 @@ class BondIndexSlice(object):
             max_eff_dur=self.max_eff_dur,
             reweight=self.reweight,
             seniority=self.seniority,
+            seniority_not_in=self.seniority_not_in,
+            country_in=self.country_in,
+            country_not_in=self.country_not_in,
             min_oas=min_oas,
             remove_defaulted=remove_defaulted,
         )
@@ -247,6 +342,42 @@ class BondIndexSlice(object):
         self.name = out
         return out
 
+    def slice_groupby_mean(
+        self,
+        data: pd.DataFrame,
+        weight_col: str = "pct_weight",
+        groupby=["date", "ticker"],
+        value_col="oas_vs_govt",
+        **slice_kws,
+    ) -> pd.Series:
+        """Slice, groupby date and ticker, take weighted average oas based on
+        bond weights, then take average oas across all tickers with equal weight.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            _description_
+        weight_col : str, optional
+            _description_, by default "pct_weight"
+        groupby : list, optional
+            _description_, by default ["date", "ticker"]
+        value_col : str, optional
+            _description_, by default "oas_vs_govt"
+
+        Returns
+        -------
+        pd.Series
+            _description_
+        """
+        df = self.slice(df=data, **slice_kws)
+        # return df
+        value = weighted_average(
+            df, data_col=value_col, weight_col=weight_col, by_col=groupby
+        ).reset_index()
+        value.columns = groupby + [value_col]
+        out = value.groupby("date").mean()
+        return out
+
 
 @dataclass
 class BondIndexStudy(object):
@@ -255,36 +386,46 @@ class BondIndexStudy(object):
     members: dict = None
 
     @staticmethod
-    def get_default_slices() -> List[BondIndexSlice]:
+    def get_default_slices(config: IndexConfig) -> List[BondIndexSlice]:
         # fmt: off
         slices = []
 
-        slices.append(BondIndexSlice(name='_market', reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='A', reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='A', min_maturity=1., max_maturity=5., reweight=True))
-        # slices.append(BondIndexSlice(rating_bucket='A', min_maturity=3., max_maturity=5., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='A', min_maturity=5., max_maturity=10., reweight=True))
-        # slices.append(BondIndexSlice(rating_bucket='A', min_maturity=7., max_maturity=10., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='A', min_maturity=10., max_maturity=15., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='A', min_maturity=15., max_maturity=20., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='A', min_maturity=20., max_maturity=31., reweight=True))
+        slices.append(BondIndexSlice(config=config, name='_market', reweight=True))
 
-        slices.append(BondIndexSlice(rating_bucket='BBB', reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='BBB', min_maturity=1., max_maturity=5., reweight=True))
-        # slices.append(BondIndexSlice(rating_bucket='BBB', min_maturity=3., max_maturity=5., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='BBB', min_maturity=5., max_maturity=10., reweight=True))
-        # slices.append(BondIndexSlice(rating_bucket='BBB', min_maturity=7., max_maturity=10., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='BBB', min_maturity=10., max_maturity=15., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='BBB', min_maturity=15., max_maturity=20., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='BBB', min_maturity=20., max_maturity=31., reweight=True))
+        # maturity slices
+        slices.append(BondIndexSlice(config=config, min_maturity=1., max_maturity=3., reweight=True))
+        slices.append(BondIndexSlice(config=config, min_maturity=1., max_maturity=5., reweight=True))
+        slices.append(BondIndexSlice(config=config, min_maturity=1., max_maturity=7., reweight=True))
+        slices.append(BondIndexSlice(config=config, min_maturity=1., max_maturity=10., reweight=True))
+        slices.append(BondIndexSlice(config=config, min_maturity=3., max_maturity=5., reweight=True))
+        slices.append(BondIndexSlice(config=config, min_maturity=5., max_maturity=10., reweight=True))
 
-        slices.append(BondIndexSlice(rating_bucket='BB', reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='BB', min_maturity=1., max_maturity=5., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='BB', min_maturity=5., max_maturity=10., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='B', reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='B', min_maturity=1., max_maturity=5., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='B', min_maturity=5., max_maturity=10., reweight=True))
-        slices.append(BondIndexSlice(rating_bucket='CCC', min_maturity=1., max_maturity=5., reweight=True))
+        # rating slices
+        slices.append(BondIndexSlice(config=config, rating_bucket='A', reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='A', min_maturity=1., max_maturity=5., reweight=True))
+        # slices.append(BondIndexSlice(config=config, rating_bucket='A', min_maturity=3., max_maturity=5., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='A', min_maturity=5., max_maturity=10., reweight=True))
+        # slices.append(BondIndexSlice(config=config, rating_bucket='A', min_maturity=7., max_maturity=10., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='A', min_maturity=10., max_maturity=15., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='A', min_maturity=15., max_maturity=20., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='A', min_maturity=20., max_maturity=31., reweight=True))
+
+        slices.append(BondIndexSlice(config=config, rating_bucket='BBB', reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='BBB', min_maturity=1., max_maturity=5., reweight=True))
+        # slices.append(BondIndexSlice(config=config, rating_bucket='BBB', min_maturity=3., max_maturity=5., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='BBB', min_maturity=5., max_maturity=10., reweight=True))
+        # slices.append(BondIndexSlice(config=config, rating_bucket='BBB', min_maturity=7., max_maturity=10., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='BBB', min_maturity=10., max_maturity=15., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='BBB', min_maturity=15., max_maturity=20., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='BBB', min_maturity=20., max_maturity=31., reweight=True))
+
+        slices.append(BondIndexSlice(config=config, rating_bucket='BB', reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='BB', min_maturity=1., max_maturity=5., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='BB', min_maturity=5., max_maturity=10., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='B', reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='B', min_maturity=1., max_maturity=5., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='B', min_maturity=5., max_maturity=10., reweight=True))
+        slices.append(BondIndexSlice(config=config, rating_bucket='CCC', min_maturity=1., max_maturity=5., reweight=True))
         # fmt: on
 
         sectors = [
@@ -308,70 +449,108 @@ class BondIndexStudy(object):
             "Leisure",
         ]
         for ss in sectors:
-            slices.append(BondIndexSlice(sector_level_3=ss, reweight=True))
+            slices.append(
+                BondIndexSlice(config=config, sector_level_3=ss, reweight=True)
+            )
 
         # lvl2 = ['Industrials', 'Financial', 'Utility']
         slices.append(
             BondIndexSlice(
-                sector_level_2="Industrials", rating_bucket="BBB", reweight=True
+                config=config,
+                sector_level_2="Industrials",
+                rating_bucket="BBB",
+                reweight=True,
             )
         )
         slices.append(
             BondIndexSlice(
-                sector_level_2="Financial", rating_bucket="BBB", reweight=True
+                config=config,
+                sector_level_2="Financial",
+                rating_bucket="BBB",
+                reweight=True,
             )
         )
         slices.append(
             BondIndexSlice(
-                sector_level_2="Utility", rating_bucket="BBB", reweight=True
-            )
-        )
-
-        slices.append(
-            BondIndexSlice(
-                sector_level_2="Industrials", rating_bucket="A", reweight=True
-            )
-        )
-        slices.append(
-            BondIndexSlice(
-                sector_level_2="Financial", rating_bucket="A", reweight=True
-            )
-        )
-        slices.append(
-            BondIndexSlice(
-                sector_level_2="Utility", rating_bucket="A", reweight=True
+                config=config,
+                sector_level_2="Utility",
+                rating_bucket="BBB",
+                reweight=True,
             )
         )
 
         slices.append(
             BondIndexSlice(
-                sector_level_2="Industrials", rating_bucket="BB", reweight=True
+                config=config,
+                sector_level_2="Industrials",
+                rating_bucket="A",
+                reweight=True,
             )
         )
         slices.append(
             BondIndexSlice(
-                sector_level_2="Financial", rating_bucket="BB", reweight=True
+                config=config,
+                sector_level_2="Financial",
+                rating_bucket="A",
+                reweight=True,
             )
         )
         slices.append(
             BondIndexSlice(
-                sector_level_2="Utility", rating_bucket="BB", reweight=True
+                config=config,
+                sector_level_2="Utility",
+                rating_bucket="A",
+                reweight=True,
             )
         )
 
         slices.append(
             BondIndexSlice(
-                sector_level_2="Industrials", rating_bucket="B", reweight=True
+                config=config,
+                sector_level_2="Industrials",
+                rating_bucket="BB",
+                reweight=True,
             )
         )
         slices.append(
             BondIndexSlice(
-                sector_level_2="Financial", rating_bucket="B", reweight=True
+                config=config,
+                sector_level_2="Financial",
+                rating_bucket="BB",
+                reweight=True,
             )
         )
         slices.append(
             BondIndexSlice(
-                sector_level_2="Utility", rating_bucket="B", reweight=True
+                config=config,
+                sector_level_2="Utility",
+                rating_bucket="BB",
+                reweight=True,
+            )
+        )
+
+        slices.append(
+            BondIndexSlice(
+                config=config,
+                sector_level_2="Industrials",
+                rating_bucket="B",
+                reweight=True,
+            )
+        )
+        slices.append(
+            BondIndexSlice(
+                config=config,
+                sector_level_2="Financial",
+                rating_bucket="B",
+                reweight=True,
+            )
+        )
+        slices.append(
+            BondIndexSlice(
+                config=config,
+                sector_level_2="Utility",
+                rating_bucket="B",
+                reweight=True,
             )
         )
 
@@ -384,6 +563,7 @@ class BondIndexStudy(object):
         # Bank seniors
         slices.append(
             BondIndexSlice(
+                config=config,
                 sector_level_3="Banking",
                 name="Bank_Seniors",
                 seniority=["SENR", "SECR", "SNPR"],
@@ -393,6 +573,7 @@ class BondIndexStudy(object):
         # Bank T2
         slices.append(
             BondIndexSlice(
+                config=config,
                 sector_level_3="Banking",
                 name="Bank_T2",
                 seniority=["T2", "UT2"],
@@ -404,6 +585,7 @@ class BondIndexStudy(object):
         # TODO: may need to remove SUB from tier 1 definition
         slices.append(
             BondIndexSlice(
+                config=config,
                 sector_level_3="Banking",
                 name="Bank_T1",
                 seniority=["SUB", "JSUB", "T1", "PFD", "AT1"],
@@ -413,6 +595,7 @@ class BondIndexStudy(object):
         # Insurance RT1
         slices.append(
             BondIndexSlice(
+                config=config,
                 sector_level_3="Insurance",
                 name="Insurance_T1",
                 seniority=["SUB", "JSUB", "T1", "PFD", "AT1"],
@@ -422,6 +605,7 @@ class BondIndexStudy(object):
         # Insurance T2
         slices.append(
             BondIndexSlice(
+                config=config,
                 sector_level_3="Insurance",
                 name="Insurance_T2",
                 seniority=["T2", "UT2"],
@@ -431,6 +615,7 @@ class BondIndexStudy(object):
         # corporate hybrids
         slices.append(
             BondIndexSlice(
+                config=config,
                 sector_level_2=["Utility", "Industrials"],
                 name="Corp_Hybrids",
                 seniority=["SUB", "JSUB", "PFD"],
@@ -440,6 +625,7 @@ class BondIndexStudy(object):
         # corporate seniors
         slices.append(
             BondIndexSlice(
+                config=config,
                 sector_level_2=["Utility", "Industrials"],
                 name="Corp_Seniors",
                 seniority=["SENR", "SECR", "SNPR"],
@@ -463,6 +649,7 @@ class BondIndexStudy(object):
         self,
         df: pd.DataFrame,
         slices: Iterable[BondIndexSlice] = None,
+        config: IndexConfig = None,
         min_size: int = 10,
         verbose: bool = False,
         **slice_kws,
@@ -480,9 +667,11 @@ class BondIndexStudy(object):
             _description_
         slices : Iterable[BondIndexSlice], optional
             _description_, by default None
+        config: IndexConfig, optional
+            must be given if slices is None
         """
         if slices is None:
-            slices = BondIndexStudy.get_default_slices()
+            slices = BondIndexStudy.get_default_slices(config)
 
         # for each slice, get time series stats
         res = dict()
