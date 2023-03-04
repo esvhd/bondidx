@@ -375,7 +375,7 @@ class BondIndexSlice(object):
             df, data_col=value_col, weight_col=weight_col, by_col=groupby
         ).reset_index()
         value.columns = groupby + [value_col]
-        out = value.groupby("date").mean()
+        out = value.groupby("date").mean(numeric_only=True)
         return out
 
 
