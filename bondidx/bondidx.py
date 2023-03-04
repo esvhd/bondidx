@@ -5,12 +5,13 @@ from typing import Tuple, Union, List, Iterable
 import tqdm
 import seaborn as sns
 import xarray as xr
+from functools import partial
 
 import matrix.plottools as pts
 import matrix.config as mc
 import matrix.risk as risk
 from matrix.timeseries import rebase
-from matrix.utils import weighted_average
+from matrix.utils import weighted_average, parallel_func
 
 import pypbo.perf as perf
 
@@ -387,6 +388,8 @@ class BondIndexStudy(object):
 
     @staticmethod
     def get_default_slices(config: IndexConfig) -> List[BondIndexSlice]:
+        assert config is not None
+
         # fmt: off
         slices = []
 
@@ -652,12 +655,13 @@ class BondIndexStudy(object):
         config: IndexConfig = None,
         min_size: int = 10,
         verbose: bool = False,
+        n_jobs: int = 1,
         **slice_kws,
     ):
         """Generate slice data. For studying general market OAS / yield history,
         one should add the following slice_kws:
             remove_defaulted=True, min_oas=15
-        This removes noice from defaulted bonds with 10k OAS, as well as some
+        This removes noise from defaulted bonds with 10k OAS, as well as some
         bonds trading through UST, which could be either corporate action
         or bad data.
 
@@ -676,25 +680,36 @@ class BondIndexStudy(object):
         # for each slice, get time series stats
         res = dict()
         memb = dict()
-        for x in tqdm.tqdm(slices):
-            out = x.slice(df, **slice_kws)
-            stats = slice_to_ts(out)
-            name = x.get_name()
-            if verbose:
-                print(f"{name} -> rows # = {len(out)}, ts row # = {len(stats)}")
-            if len(out) < min_size:
-                continue
-            res[name] = stats
-            memb[name] = out
+        if n_jobs != 1:
+            for x in tqdm.tqdm(slices):
+                out = x.slice(df, **slice_kws)
+                stats = slice_to_ts(out)
+                name = x.get_name()
+                if verbose:
+                    print(
+                        f"{name} -> rows # = {len(out)}, ts row # = {len(stats)}"
+                    )
+                if len(out) < min_size:
+                    continue
+                res[name] = stats
+                memb[name] = out
+        else:
+            print("run in Parallel mode....")
+            # for some reason the below verison is very slow...
 
-        # for some reason the below verison is very slow...
-        # funcs = [x.slice for x in slices]
-        # names = [x.get_name() for x in slices]
-        # results = hp.parallel_func(funcs, df, **slice_kws)
-        # for out, name in zip(results, names):
-        #     stats = slice_to_ts(out)
-        #     res[name] = stats
-        #     memb[name] = out
+            def _proc(x, df, **slice_kws):
+                name = x.get_name()
+                out = x.slice(df, **slice_kws)
+                stats = slice_to_ts(out)
+                return [name, out, stats]
+
+            funcs = [partial(_proc, x) for x in slices]
+            # names = [x.get_name() for x in slices]
+            results = parallel_func(funcs, df, n_jobs=n_jobs, **slice_kws)
+            # for res, name in zip(results, names):
+            for name, out, stats in results:
+                res[name] = stats
+                memb[name] = out
 
         self.members = memb
         self.time_series_data = res
